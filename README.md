@@ -29,10 +29,9 @@ Several existing, well-known PyTorch issues touch float16 LayerNorm:
   guarantee being violated.
 - [pytorch/pytorch#170758](https://github.com/pytorch/pytorch/issues/170758)
   ("bf16 layernorm has wrong answer") -- **bfloat16**, not float16;
-  affects the *entire* output, not a `length % 8`-sized tail; open as
-  "expected due to reduced-precision accumulation" per a PyTorch
-  collaborator's comment, i.e. accepted as unavoidable rounding, not a
-  correctness violation the way an exact-zero case is.
+  a PyTorch collaborator's own comment treats it as expected reduced-
+  precision-accumulation behavior, i.e. accepted as unavoidable
+  rounding, not a correctness violation the way an exact-zero case is.
 - [pytorch/pytorch#173885](https://github.com/pytorch/pytorch/issues/173885)
   -- Inductor-compiled CPU float16 LayerNorm turning `Inf` input into
   `NaN`; a `torch.compile`-specific Welford-accumulator issue, already
@@ -42,16 +41,21 @@ None of these describe the specific signature reproduced here: eager
 mode (no `torch.compile`), plain `float16` (not `bfloat16`), an
 **exact-constant** (zero-variance) input where the mathematically
 correct answer is unambiguous (`0.0`, not merely "close to some
-value"), and a failure confined precisely to a `length % 8`-sized
-tail. A search of the PyTorch issue tracker at the time of writing did
-not turn up an existing report matching this exact signature; if one
-is found later, this README will be updated to reference it rather
-than claim to be first.
+value"). A search of the PyTorch issue tracker at the time of writing
+did not turn up an existing report matching this exact signature; if
+one is found later, this README will be updated to reference it
+rather than claim to be first.
 
-## The bug, characterized
+## The bug, characterized (two distinct shapes observed in this project's own CI)
 
-Reproduced by brute-force sweep over lengths 1-39 with a constant
-`100.0` input:
+This package's own CI (`.github/workflows/ci.yml`) confirmed the bug
+is real on **both** `ubuntu-latest` and `macos-latest`, but its exact
+failure shape differs by platform/build -- an honest finding from
+actually running on both, not assumed:
+
+**macOS (this development host, Accelerate-linked torch 2.14.0 CPU
+build):** the failure is confined to a `length % 8`-sized tail. Sweep
+over lengths 1-39 with constant input `100.0`:
 
 ```
 length= 7  nonzero=7   (all wrong -- length < one full vector)
@@ -59,23 +63,42 @@ length= 8  nonzero=0   (correct -- exact multiple of 8)
 length= 9  nonzero=1   (length % 8 == 1)
 length=12  nonzero=4   (length % 8 == 4)
 length=16  nonzero=0   (correct -- exact multiple of 8)
-length=20  nonzero=4   (length % 8 == 4)
 ```
 
-The nonzero count exactly equals `length % 8` at every length tested,
-and every exact multiple of 8 is correct. This is consistent with the
-CPU kernel's SIMD vectorization width (8 float16 lanes on the AVX2/
-AVX512 paths PyTorch's `layer_norm_kernel.cpp` dispatches to) mishandling
-its scalar remainder/tail loop specifically for the exact-zero-variance
-case -- ordinary (non-constant) float16 input at the same lengths
-matches a float32-upcast reference to full float16 precision with zero
-tail-specific divergence (see `test_nonconstant_input_at_least_as_
+The nonzero count exactly equals `length % 8` at every length tested
+on this platform, consistent with the CPU kernel's SIMD vectorization
+width (8 float16 lanes) mishandling its scalar remainder/tail loop for
+the exact-zero-variance case specifically.
+
+**Linux (GitHub Actions `ubuntu-latest`, `torch==2.14.0+cu130` wheel,
+CPU code path since the runner has no GPU):** the failure is instead
+uniform across the *entire* row, by a small fixed amount, independent
+of length:
+
+```
+length=8:  [0.0009765625] * 8
+length=12: [0.0009765625] * 12
+length=16: [0.0009765625] * 16
+```
+
+This is a **different failure shape** from the macOS tail pattern --
+this package does not claim a single universal root cause across
+platforms/builds, only that both are real, both violate the same
+unambiguous correctness standard (an exact-zero-variance row's true
+output is exactly `0.0`, not "close to 0"), and both are fixed by the
+same guard. `diagnose()`/the CLI record which of the two known shapes
+(or neither, which would indicate a third, previously-unseen shape) a
+given host exhibits, rather than asserting one platform's pattern
+universally. Ordinary (non-constant) float16 input at the same
+lengths matches a float32-upcast reference to full float16 precision
+on both platforms tested (see `test_nonconstant_input_at_least_as_
 accurate_as_native` in the test suite), and float32/float64 LayerNorm
-on the identical constant input is correct at every length tested. Not
-every constant *value* triggers it (some, like `1.0` or `10.0`, happen
-to land on a bit pattern where the buggy path is a no-op), but a wide
-majority of realistic activation magnitudes do (confirmed: 25/33
-sampled values from 0.1 to 60000 trigger it at length 12).
+on the identical constant input is correct at every length tested on
+both platforms. Not every constant *value* triggers the bug on macOS
+(some, like `1.0` or `10.0`, happen to land on a bit pattern where the
+buggy path is a no-op), but a wide majority of realistic activation
+magnitudes do (confirmed: 25/33 sampled values from 0.1 to 60000
+trigger it at length 12 on macOS).
 
 ## Usage
 

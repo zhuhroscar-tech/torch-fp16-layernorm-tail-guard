@@ -11,24 +11,36 @@ commands and the live-source verification trail):
   torch.nn.functional.layer_norm(
       torch.full((1, 12), 100.0, dtype=torch.float16), (12,), eps=1e-5,
   )
-  # -> [0, 0, 0, 0, 0, 0, 0, 0, 0.0977, 0.0977, 0.0977, 0.0977]
+  # macOS (Accelerate-linked build): [0,0,0,0,0,0,0,0, 0.0977,0.0977,0.0977,0.0977]
+  # Linux (2.14.0+cu130, CPU path):  [0.000977]*12 (every element wrong,
+  #                                   uniformly, by a small constant amount)
   # every true value must be exactly 0.0 (constant input has zero
-  # variance by definition -- (x - mean) is exactly 0 everywhere), but
-  # the last 4 = 12 % 8 elements come back nonzero.
+  # variance by definition -- (x - mean) is exactly 0 everywhere).
 
-The failure is exactly aligned to the input length modulo 8 (the
-AVX/SIMD lane width torch's CPU float16 layer_norm kernel vectorizes
-over): for every constant-input length tested from 1 to 39, the number
-of wrong (nonzero) output elements equals ``length % 8`` precisely,
-and lengths that are exact multiples of 8 are always correct. This
-points at the kernel's scalar remainder-handling path for the trailing
-partial vector, not a generic float16-precision issue -- float32 and
-float64 LayerNorm on the identical input are correct at every length
+The failure shape is CI-confirmed to differ by build/platform, which
+matters for how this is described: on this macOS development host
+(Accelerate-linked CPU build), it is confined to the input length's
+remainder modulo 8 (the AVX/SIMD lane width torch's CPU float16
+layer_norm kernel vectorizes over) -- every length from 1-39 shows
+exactly ``length % 8`` wrong elements, with exact multiples of 8
+always correct. On GitHub Actions' ubuntu-latest runner (torch
+2.14.0+cu130 wheel, still running the CPU kernel since no GPU is
+present), ALL elements come back wrong instead, uniformly, by a small
+fixed amount (~0.001) independent of length. Both are real, both are
+wrong by the same unambiguous standard (exact-zero variance means the
+true output is exactly 0.0, not "close to 0"), and both are fixed by
+the same float32-upcast guard -- but this package does NOT claim a
+single universal root cause or a single wrong-element-count signature
+across all platforms; the tests and diagnose() output treat the
+per-platform signature as informational, and only assert the
+underlying invariant (any constant row should be all-zero) and the
+guard's correctness, which hold regardless of which shape the native
+bug takes on a given host. float32 and float64 LayerNorm on the
+identical input are correct at every length tested on every platform
 tested, and float16 LayerNorm on NON-constant input (genuine nonzero
 variance) matches a float32-upcast reference to machine precision at
-every length tested. The bug is specific to the *exact-zero-variance*
-codepath, likely a division-by-a-not-quite-zero rstd computed from
-uninitialized/stale SIMD lanes in the tail.
+every length tested -- the bug is specific to the exact-zero-variance
+codepath.
 
 This package does not wait for or depend on an upstream fix (as of
 this writing, no existing PyTorch issue was found describing this
@@ -114,7 +126,8 @@ class ConstantRowCase:
     length: int
     buggy_nonzero_count: int
     expected_nonzero_count: int
-    buggy_matches_bug_signature: bool
+    buggy_matches_tail_signature: bool
+    buggy_matches_uniform_signature: bool
     guard_nonzero_count: int
     guard_is_correct: bool
 
@@ -133,7 +146,16 @@ def _run_constant_row_case(torch_module, length: int, value: float = 100.0) -> C
         length=length,
         buggy_nonzero_count=buggy_nonzero,
         expected_nonzero_count=0,
-        buggy_matches_bug_signature=(buggy_nonzero == length % 8),
+        # Two distinct failure shapes have been observed in CI across
+        # platforms/builds (see core.py module docstring): a
+        # tail-only pattern (macOS/Accelerate: nonzero count ==
+        # length % 8) and a uniform whole-row pattern (Linux
+        # cu130 wheel CPU path: every element wrong). Both fields are
+        # recorded so diagnose()/the CLI can report which shape this
+        # host exhibits without either being asserted as the only
+        # valid one.
+        buggy_matches_tail_signature=(buggy_nonzero == length % 8),
+        buggy_matches_uniform_signature=(buggy_nonzero == length),
         guard_nonzero_count=guard_nonzero,
         guard_is_correct=(guard_nonzero == 0),
     )
@@ -195,7 +217,8 @@ def diagnose(
 
     any_bug_present = any(c.buggy_nonzero_count != 0 for c in constant_cases)
     bug_signature_confirmed = any(
-        c.buggy_nonzero_count != 0 and c.buggy_matches_bug_signature
+        c.buggy_nonzero_count != 0
+        and (c.buggy_matches_tail_signature or c.buggy_matches_uniform_signature)
         for c in constant_cases
     )
     guard_fully_correct = all(c.guard_is_correct for c in constant_cases) and all(

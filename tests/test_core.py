@@ -43,23 +43,31 @@ class TestNativeBugReproduction:
             "accordingly rather than treating this as a regression"
         )
 
-    def test_bug_signature_matches_length_mod_8(self):
+    def test_bug_shape_is_one_of_the_two_documented_signatures(self):
+        # Two distinct failure shapes have been observed across
+        # platforms/builds in this project's own CI (see core.py's
+        # module docstring): a tail-only pattern (nonzero count ==
+        # length % 8, observed on macOS/Accelerate builds) and a
+        # uniform whole-row pattern (every element wrong, observed on
+        # the Linux cu130 wheel's CPU path). This test only asserts
+        # that whenever the bug is present, it matches ONE of the two
+        # known shapes (not neither) -- it does not assume which shape
+        # a given host will exhibit, since that has been shown to vary
+        # by platform/build in CI.
         report = diagnose(constant_lengths=tuple(range(1, 25)))
         for case in report["constant_cases"]:
-            if case["length"] % 8 == 0:
-                assert case["buggy_nonzero_count"] == 0, (
-                    f"length={case['length']} is a multiple of 8 and "
-                    "should be unaffected by the documented bug, but "
-                    f"native output has {case['buggy_nonzero_count']} "
-                    "nonzero elements"
-                )
-            else:
-                assert case["buggy_nonzero_count"] == case["length"] % 8, (
-                    f"length={case['length']}: expected the documented "
-                    f"signature (nonzero count == length % 8 == "
-                    f"{case['length'] % 8}), got "
-                    f"{case['buggy_nonzero_count']}"
-                )
+            if case["buggy_nonzero_count"] == 0:
+                continue
+            assert (
+                case["buggy_matches_tail_signature"]
+                or case["buggy_matches_uniform_signature"]
+            ), (
+                f"length={case['length']}: nonzero count "
+                f"{case['buggy_nonzero_count']} matches neither the "
+                f"tail signature (length % 8 == {case['length'] % 8}) "
+                f"nor the uniform signature (length == {case['length']}) "
+                "-- a third, previously-unseen failure shape"
+            )
 
 
 class TestSafeLayerNormConstantRows:
