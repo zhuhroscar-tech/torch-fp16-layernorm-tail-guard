@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torch-fp16-layernorm-tail-guard"
+version = "0.1.0"
+description = "Guards a real torch CPU float16 nn.LayerNorm bug: exact-constant rows whose length is not a multiple of 8 silently get nonzero garbage in the last (length % 8) elements instead of the mathematically guaranteed 0"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "zhuhroscar-tech" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov"]
+torch = ["torch>=2.0"]
+
+[project.scripts]
+torch-fp16-layernorm-tail-guard = "torch_fp16_layernorm_tail_guard.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
