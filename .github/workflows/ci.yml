@@ -25,13 +25,12 @@ jobs:
         run: |
           python -c "
           import torch
-          for n in range(1, 40):
+          for n in [8, 12, 16]:
               x = torch.full((1,n), 100.0, dtype=torch.float16)
               out = torch.nn.functional.layer_norm(x, (n,), eps=1e-5)
-              nz = int((out != 0).sum().item())
-              print(f'n={n:3d} nonzero={nz} n%8={n%8} n%16={n%16}')
+              print(f'n={n} full_output={out.tolist()}')
+          print('torch version:', torch.__version__)
           print(torch.__config__.parallel_info())
-          import subprocess
           "
       - name: Run tests
         run: python -m pytest -v --cov=torch_fp16_layernorm_tail_guard --cov-report=term-missing -k "not test_bug_signature_matches_length_mod_8"
